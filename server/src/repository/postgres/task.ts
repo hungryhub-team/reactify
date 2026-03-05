@@ -1,5 +1,6 @@
-import { prisma } from "../../db";
-import type { Prisma } from "../../../generated/prisma/client";
+import { db } from "../../db";
+import { tasks } from "../../db/schema";
+import { eq, ilike, or, count as drizzleCount, sql } from "drizzle-orm";
 import {
   type RepositoryResult,
   type PaginationParams,
@@ -13,26 +14,11 @@ import {
 // Types
 // ---------------------
 
-export type TaskEntity = {
-  id: number;
-  title: string;
-  description: string | null;
-  date: Date;
-  createdAt: Date;
-  updatedAt: Date;
-};
+export type TaskEntity = typeof tasks.$inferSelect;
 
-export type TaskCreateInput = {
-  title: string;
-  description?: string | null;
-  date: Date;
-};
+export type TaskCreateInput = typeof tasks.$inferInsert;
 
-export type TaskUpdateInput = {
-  title?: string;
-  description?: string | null;
-  date?: Date;
-};
+export type TaskUpdateInput = Partial<TaskCreateInput>;
 
 export type TaskSearchParams = {
   q?: string;
@@ -48,10 +34,8 @@ export class TaskRepository {
    */
   async findById(id: number): Promise<RepositoryResult<TaskEntity | null>> {
     try {
-      const task = await prisma.task.findUnique({
-        where: { id },
-      });
-      return success(task);
+      const result = await db.select().from(tasks).where(eq(tasks.id, id)).limit(1);
+      return success(result[0] ?? null);
     } catch (error) {
       console.error("[TaskRepository] findById error:", error);
       return failure(createError("Failed to find task by ID", "DB_ERROR", error));
@@ -66,25 +50,25 @@ export class TaskRepository {
       const { q, page, limit } = params;
       const skip = (page - 1) * limit;
 
-      const where: Prisma.TaskWhereInput = q
-        ? {
-            OR: [
-              { title: { contains: q, mode: "insensitive" } },
-              { description: { contains: q, mode: "insensitive" } },
-            ],
-          }
-        : {};
+      let conditions = undefined;
+      if (q) {
+        conditions = or(
+          ilike(tasks.title, `%${q}%`),
+          ilike(tasks.description, `%${q}%`)
+        );
+      }
 
-      const [items, total] = await Promise.all([
-        prisma.task.findMany({
-          where,
-          orderBy: { createdAt: "desc" },
-          skip,
-          take: limit,
-        }),
-        prisma.task.count({ where }),
+      const [items, totalResult] = await Promise.all([
+        db.select()
+          .from(tasks)
+          .where(conditions)
+          .orderBy(sql`${tasks.createdAt} DESC`)
+          .limit(limit)
+          .offset(skip),
+        db.select({ count: drizzleCount() }).from(tasks).where(conditions),
       ]);
 
+      const total = totalResult[0]?.count ?? 0;
       const totalPages = Math.ceil(total / limit);
 
       return success({
@@ -105,14 +89,12 @@ export class TaskRepository {
    */
   async create(input: TaskCreateInput): Promise<RepositoryResult<TaskEntity>> {
     try {
-      const task = await prisma.task.create({
-        data: {
-          title: input.title,
-          description: input.description ?? null,
-          date: input.date,
-        },
-      });
-      return success(task);
+      const result = await db.insert(tasks).values({
+        title: input.title,
+        description: input.description ?? null,
+        date: input.date,
+      }).returning();
+      return success(result[0]!);
     } catch (error) {
       console.error("[TaskRepository] create error:", error);
       return failure(createError("Failed to create task", "DB_ERROR", error));
@@ -124,11 +106,18 @@ export class TaskRepository {
    */
   async update(id: number, input: TaskUpdateInput): Promise<RepositoryResult<TaskEntity>> {
     try {
-      const task = await prisma.task.update({
-        where: { id },
-        data: input,
-      });
-      return success(task);
+      const updateData = {
+        ...input,
+        updatedAt: new Date(),
+      };
+
+      const result = await db.update(tasks).set(updateData).where(eq(tasks.id, id)).returning();
+
+      if (result.length === 0) {
+        return failure(createError("Task not found to update", "NOT_FOUND", null));
+      }
+
+      return success(result[0]!);
     } catch (error) {
       console.error("[TaskRepository] update error:", error);
       return failure(createError("Failed to update task", "DB_ERROR", error));
@@ -140,10 +129,13 @@ export class TaskRepository {
    */
   async delete(id: number): Promise<RepositoryResult<TaskEntity>> {
     try {
-      const task = await prisma.task.delete({
-        where: { id },
-      });
-      return success(task);
+      const result = await db.delete(tasks).where(eq(tasks.id, id)).returning();
+
+      if (result.length === 0) {
+        return failure(createError("Task not found to delete", "NOT_FOUND", null));
+      }
+
+      return success(result[0]!);
     } catch (error) {
       console.error("[TaskRepository] delete error:", error);
       return failure(createError("Failed to delete task", "DB_ERROR", error));
@@ -153,10 +145,10 @@ export class TaskRepository {
   /**
    * Count total tasks with optional filter
    */
-  async count(where?: Prisma.TaskWhereInput): Promise<RepositoryResult<number>> {
+  async count(): Promise<RepositoryResult<number>> {
     try {
-      const count = await prisma.task.count({ where });
-      return success(count);
+      const result = await db.select({ value: drizzleCount() }).from(tasks);
+      return success(result[0]?.value ?? 0);
     } catch (error) {
       console.error("[TaskRepository] count error:", error);
       return failure(createError("Failed to count tasks", "DB_ERROR", error));
@@ -168,10 +160,8 @@ export class TaskRepository {
    */
   async exists(id: number): Promise<RepositoryResult<boolean>> {
     try {
-      const count = await prisma.task.count({
-        where: { id },
-      });
-      return success(count > 0);
+      const result = await db.select({ id: tasks.id }).from(tasks).where(eq(tasks.id, id)).limit(1);
+      return success(result.length > 0);
     } catch (error) {
       console.error("[TaskRepository] exists error:", error);
       return failure(createError("Failed to check task existence", "DB_ERROR", error));

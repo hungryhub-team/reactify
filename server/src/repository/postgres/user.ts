@@ -1,5 +1,6 @@
-import { prisma } from "../../db";
-import type { Prisma } from "../../../generated/prisma/client";
+import { db } from "../../db";
+import { users, sessions, accounts } from "../../db/schema";
+import { eq, or, ilike, count as drizzleCount, sql } from "drizzle-orm";
 import {
   type RepositoryResult,
   type PaginationParams,
@@ -13,32 +14,9 @@ import {
 // Types
 // ---------------------
 
-export type UserEntity = {
-  id: string;
-  email: string;
-  name: string | null;
-  emailVerified: boolean | null;
-  image: string | null;
-  role: number;
-  createdAt: Date;
-  updatedAt: Date;
-};
-
-export type UserCreateInput = {
-  email: string;
-  name?: string | null;
-  emailVerified?: boolean | null;
-  image?: string | null;
-  role?: number;
-};
-
-export type UserUpdateInput = {
-  email?: string;
-  name?: string | null;
-  emailVerified?: boolean | null;
-  image?: string | null;
-  role?: number;
-};
+export type UserEntity = typeof users.$inferSelect;
+export type UserCreateInput = typeof users.$inferInsert;
+export type UserUpdateInput = Partial<UserCreateInput>;
 
 export type UserSearchParams = {
   q?: string;
@@ -69,29 +47,27 @@ export class UserRepository {
    */
   async findById(id: string, includeRelations = false): Promise<RepositoryResult<UserEntity | UserWithRelations | null>> {
     try {
-      const user = await prisma.user.findUnique({
-        where: { id },
-        include: includeRelations
-          ? {
-              sessions: {
-                select: {
-                  id: true,
-                  token: true,
-                  expiresAt: true,
-                  createdAt: true,
-                },
-              },
-              accounts: {
-                select: {
-                  id: true,
-                  providerId: true,
-                  accountId: true,
-                },
-              },
+      const user = await db.query.users.findFirst({
+        where: eq(users.id, id),
+        with: includeRelations ? {
+          sessions: {
+            columns: {
+              id: true,
+              token: true,
+              expiresAt: true,
+              createdAt: true,
             }
-          : undefined,
+          },
+          accounts: {
+            columns: {
+              id: true,
+              providerId: true,
+              accountId: true,
+            }
+          }
+        } : undefined,
       });
-      return success(user);
+      return success(user ?? null);
     } catch (error) {
       console.error("[UserRepository] findById error:", error);
       return failure(createError("Failed to find user by ID", "DB_ERROR", error));
@@ -103,10 +79,10 @@ export class UserRepository {
    */
   async findByEmail(email: string): Promise<RepositoryResult<UserEntity | null>> {
     try {
-      const user = await prisma.user.findUnique({
-        where: { email },
+      const user = await db.query.users.findFirst({
+        where: eq(users.email, email),
       });
-      return success(user);
+      return success(user ?? null);
     } catch (error) {
       console.error("[UserRepository] findByEmail error:", error);
       return failure(createError("Failed to find user by email", "DB_ERROR", error));
@@ -121,31 +97,32 @@ export class UserRepository {
       const { q, role, page, limit } = params;
       const skip = (page - 1) * limit;
 
-      const where: Prisma.UserWhereInput = {};
-
-      // Apply search filter
+      let conditionsList = [];
       if (q) {
-        where.OR = [
-          { name: { contains: q, mode: "insensitive" } },
-          { email: { contains: q, mode: "insensitive" } },
-        ];
+        conditionsList.push(
+          or(
+            ilike(users.name, `%${q}%`),
+            ilike(users.email, `%${q}%`)
+          )
+        );
       }
-
-      // Apply role filter
       if (role !== undefined && role !== null) {
-        where.role = role;
+        conditionsList.push(eq(users.role, role));
       }
 
-      const [items, total] = await Promise.all([
-        prisma.user.findMany({
-          where,
-          orderBy: { createdAt: "desc" },
-          skip,
-          take: limit,
-        }),
-        prisma.user.count({ where }),
+      const conditions = conditionsList.length > 0 ? sql.join(conditionsList, sql` AND `) : undefined;
+
+      const [items, totalResult] = await Promise.all([
+        db.select()
+          .from(users)
+          .where(conditions)
+          .orderBy(sql`${users.createdAt} DESC`)
+          .limit(limit)
+          .offset(skip),
+        db.select({ count: drizzleCount() }).from(users).where(conditions),
       ]);
 
+      const total = totalResult[0]?.count ?? 0;
       const totalPages = Math.ceil(total / limit);
 
       return success({
@@ -166,24 +143,17 @@ export class UserRepository {
    */
   async create(input: UserCreateInput): Promise<RepositoryResult<UserEntity>> {
     try {
-      const user = await prisma.user.create({
-        data: {
-          email: input.email,
-          name: input.name ?? null,
-          emailVerified: input.emailVerified ?? null,
-          image: input.image ?? null,
-          role: input.role ?? 2, // Default to USER role
-        },
-      });
-      return success(user);
+      const result = await db.insert(users).values({
+        ...input,
+        id: input.id ?? crypto.randomUUID(), // Assume cuid/uuid replacement
+        role: input.role ?? 2, // Default to USER role
+      }).returning();
+      return success(result[0]!);
     } catch (error) {
       console.error("[UserRepository] create error:", error);
-      
-      // Handle unique constraint violation
-      if (error instanceof Error && "code" in error && error.code === "P2002") {
+      if (typeof error === 'object' && error !== null && 'code' in error && error.code === "23505") {
         return failure(createError("Email already exists", "DUPLICATE_EMAIL", error));
       }
-      
       return failure(createError("Failed to create user", "DB_ERROR", error));
     }
   }
@@ -193,19 +163,18 @@ export class UserRepository {
    */
   async update(id: string, input: UserUpdateInput): Promise<RepositoryResult<UserEntity>> {
     try {
-      const user = await prisma.user.update({
-        where: { id },
-        data: input,
-      });
-      return success(user);
+      const result = await db.update(users).set({
+        ...input,
+        updatedAt: new Date(),
+      }).where(eq(users.id, id)).returning();
+
+      if (result.length === 0) return failure(createError("User not found", "NOT_FOUND", null));
+      return success(result[0]!);
     } catch (error) {
       console.error("[UserRepository] update error:", error);
-      
-      // Handle unique constraint violation
-      if (error instanceof Error && "code" in error && error.code === "P2002") {
+      if (typeof error === 'object' && error !== null && 'code' in error && error.code === "23505") {
         return failure(createError("Email already exists", "DUPLICATE_EMAIL", error));
       }
-      
       return failure(createError("Failed to update user", "DB_ERROR", error));
     }
   }
@@ -215,10 +184,9 @@ export class UserRepository {
    */
   async delete(id: string): Promise<RepositoryResult<UserEntity>> {
     try {
-      const user = await prisma.user.delete({
-        where: { id },
-      });
-      return success(user);
+      const result = await db.delete(users).where(eq(users.id, id)).returning();
+      if (result.length === 0) return failure(createError("User not found", "NOT_FOUND", null));
+      return success(result[0]!);
     } catch (error) {
       console.error("[UserRepository] delete error:", error);
       return failure(createError("Failed to delete user", "DB_ERROR", error));
@@ -226,12 +194,12 @@ export class UserRepository {
   }
 
   /**
-   * Count total users with optional filter
+   * Count total users
    */
-  async count(where?: Prisma.UserWhereInput): Promise<RepositoryResult<number>> {
+  async count(): Promise<RepositoryResult<number>> {
     try {
-      const count = await prisma.user.count({ where });
-      return success(count);
+      const result = await db.select({ value: drizzleCount() }).from(users);
+      return success(result[0]?.value ?? 0);
     } catch (error) {
       console.error("[UserRepository] count error:", error);
       return failure(createError("Failed to count users", "DB_ERROR", error));
@@ -243,10 +211,8 @@ export class UserRepository {
    */
   async exists(id: string): Promise<RepositoryResult<boolean>> {
     try {
-      const count = await prisma.user.count({
-        where: { id },
-      });
-      return success(count > 0);
+      const result = await db.select({ id: users.id }).from(users).where(eq(users.id, id)).limit(1);
+      return success(result.length > 0);
     } catch (error) {
       console.error("[UserRepository] exists error:", error);
       return failure(createError("Failed to check user existence", "DB_ERROR", error));
@@ -258,10 +224,8 @@ export class UserRepository {
    */
   async emailExists(email: string): Promise<RepositoryResult<boolean>> {
     try {
-      const count = await prisma.user.count({
-        where: { email },
-      });
-      return success(count > 0);
+      const result = await db.select({ id: users.id }).from(users).where(eq(users.email, email)).limit(1);
+      return success(result.length > 0);
     } catch (error) {
       console.error("[UserRepository] emailExists error:", error);
       return failure(createError("Failed to check email existence", "DB_ERROR", error));
@@ -277,16 +241,17 @@ export class UserRepository {
       const limit = params?.limit ?? 10;
       const skip = (page - 1) * limit;
 
-      const [items, total] = await Promise.all([
-        prisma.user.findMany({
-          where: { role },
-          orderBy: { createdAt: "desc" },
-          skip,
-          take: limit,
-        }),
-        prisma.user.count({ where: { role } }),
+      const [items, totalResult] = await Promise.all([
+        db.select()
+          .from(users)
+          .where(eq(users.role, role))
+          .orderBy(sql`${users.createdAt} DESC`)
+          .limit(limit)
+          .offset(skip),
+        db.select({ count: drizzleCount() }).from(users).where(eq(users.role, role)),
       ]);
 
+      const total = totalResult[0]?.count ?? 0;
       const totalPages = Math.ceil(total / limit);
 
       return success({

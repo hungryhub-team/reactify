@@ -1,5 +1,6 @@
-import { prisma } from "../../db";
-import type { Prisma } from "../../../generated/prisma/client";
+import { db } from "../../db";
+import { accounts } from "../../db/schema";
+import { eq, and, count as drizzleCount, sql } from "drizzle-orm";
 import {
   type RepositoryResult,
   type PaginationParams,
@@ -13,44 +14,9 @@ import {
 // Types
 // ---------------------
 
-export type AccountEntity = {
-  id: string;
-  accountId: string;
-  providerId: string;
-  userId: string;
-  accessToken: string | null;
-  refreshToken: string | null;
-  idToken: string | null;
-  accessTokenExpiresAt: Date | null;
-  refreshTokenExpiresAt: Date | null;
-  scope: string | null;
-  password: string | null;
-  createdAt: Date;
-  updatedAt: Date;
-};
-
-export type AccountCreateInput = {
-  accountId: string;
-  providerId: string;
-  userId: string;
-  accessToken?: string | null;
-  refreshToken?: string | null;
-  idToken?: string | null;
-  accessTokenExpiresAt?: Date | null;
-  refreshTokenExpiresAt?: Date | null;
-  scope?: string | null;
-  password?: string | null;
-};
-
-export type AccountUpdateInput = {
-  accessToken?: string | null;
-  refreshToken?: string | null;
-  idToken?: string | null;
-  accessTokenExpiresAt?: Date | null;
-  refreshTokenExpiresAt?: Date | null;
-  scope?: string | null;
-  password?: string | null;
-};
+export type AccountEntity = typeof accounts.$inferSelect;
+export type AccountCreateInput = typeof accounts.$inferInsert;
+export type AccountUpdateInput = Partial<AccountCreateInput>;
 
 export type AccountWithUser = AccountEntity & {
   user: {
@@ -71,22 +37,20 @@ export class AccountRepository {
    */
   async findById(id: string, includeUser = false): Promise<RepositoryResult<AccountEntity | AccountWithUser | null>> {
     try {
-      const account = await prisma.account.findUnique({
-        where: { id },
-        include: includeUser
-          ? {
-              user: {
-                select: {
-                  id: true,
-                  email: true,
-                  name: true,
-                  role: true,
-                },
-              },
+      const account = await db.query.accounts.findFirst({
+        where: eq(accounts.id, id),
+        with: includeUser ? {
+          user: {
+            columns: {
+              id: true,
+              email: true,
+              name: true,
+              role: true,
             }
-          : undefined,
+          }
+        } : undefined,
       });
-      return success(account);
+      return success(account ?? null);
     } catch (error) {
       console.error("[AccountRepository] findById error:", error);
       return failure(createError("Failed to find account by ID", "DB_ERROR", error));
@@ -102,25 +66,20 @@ export class AccountRepository {
     includeUser = false
   ): Promise<RepositoryResult<AccountEntity | AccountWithUser | null>> {
     try {
-      const account = await prisma.account.findFirst({
-        where: {
-          providerId,
-          accountId,
-        },
-        include: includeUser
-          ? {
-              user: {
-                select: {
-                  id: true,
-                  email: true,
-                  name: true,
-                  role: true,
-                },
-              },
+      const account = await db.query.accounts.findFirst({
+        where: and(eq(accounts.providerId, providerId), eq(accounts.accountId, accountId)),
+        with: includeUser ? {
+          user: {
+            columns: {
+              id: true,
+              email: true,
+              name: true,
+              role: true,
             }
-          : undefined,
+          }
+        } : undefined,
       });
-      return success(account);
+      return success(account ?? null);
     } catch (error) {
       console.error("[AccountRepository] findByProviderAccount error:", error);
       return failure(createError("Failed to find account by provider", "DB_ERROR", error));
@@ -136,16 +95,17 @@ export class AccountRepository {
       const limit = params?.limit ?? 10;
       const skip = (page - 1) * limit;
 
-      const [items, total] = await Promise.all([
-        prisma.account.findMany({
-          where: { userId },
-          orderBy: { createdAt: "desc" },
-          skip,
-          take: limit,
-        }),
-        prisma.account.count({ where: { userId } }),
+      const [items, totalResult] = await Promise.all([
+        db.select()
+          .from(accounts)
+          .where(eq(accounts.userId, userId))
+          .orderBy(sql`${accounts.createdAt} DESC`)
+          .limit(limit)
+          .offset(skip),
+        db.select({ count: drizzleCount() }).from(accounts).where(eq(accounts.userId, userId)),
       ]);
 
+      const total = totalResult[0]?.count ?? 0;
       const totalPages = Math.ceil(total / limit);
 
       return success({
@@ -170,16 +130,17 @@ export class AccountRepository {
       const limit = params?.limit ?? 10;
       const skip = (page - 1) * limit;
 
-      const [items, total] = await Promise.all([
-        prisma.account.findMany({
-          where: { providerId },
-          orderBy: { createdAt: "desc" },
-          skip,
-          take: limit,
-        }),
-        prisma.account.count({ where: { providerId } }),
+      const [items, totalResult] = await Promise.all([
+        db.select()
+          .from(accounts)
+          .where(eq(accounts.providerId, providerId))
+          .orderBy(sql`${accounts.createdAt} DESC`)
+          .limit(limit)
+          .offset(skip),
+        db.select({ count: drizzleCount() }).from(accounts).where(eq(accounts.providerId, providerId)),
       ]);
 
+      const total = totalResult[0]?.count ?? 0;
       const totalPages = Math.ceil(total / limit);
 
       return success({
@@ -203,15 +164,16 @@ export class AccountRepository {
       const { page, limit } = params;
       const skip = (page - 1) * limit;
 
-      const [items, total] = await Promise.all([
-        prisma.account.findMany({
-          orderBy: { createdAt: "desc" },
-          skip,
-          take: limit,
-        }),
-        prisma.account.count(),
+      const [items, totalResult] = await Promise.all([
+        db.select()
+          .from(accounts)
+          .orderBy(sql`${accounts.createdAt} DESC`)
+          .limit(limit)
+          .offset(skip),
+        db.select({ count: drizzleCount() }).from(accounts),
       ]);
 
+      const total = totalResult[0]?.count ?? 0;
       const totalPages = Math.ceil(total / limit);
 
       return success({
@@ -232,21 +194,11 @@ export class AccountRepository {
    */
   async create(input: AccountCreateInput): Promise<RepositoryResult<AccountEntity>> {
     try {
-      const account = await prisma.account.create({
-        data: {
-          accountId: input.accountId,
-          providerId: input.providerId,
-          userId: input.userId,
-          accessToken: input.accessToken ?? null,
-          refreshToken: input.refreshToken ?? null,
-          idToken: input.idToken ?? null,
-          accessTokenExpiresAt: input.accessTokenExpiresAt ?? null,
-          refreshTokenExpiresAt: input.refreshTokenExpiresAt ?? null,
-          scope: input.scope ?? null,
-          password: input.password ?? null,
-        },
-      });
-      return success(account);
+      const result = await db.insert(accounts).values({
+        ...input,
+        id: input.id ?? crypto.randomUUID(), // Assume cuid/uuid replacement
+      }).returning();
+      return success(result[0]!);
     } catch (error) {
       console.error("[AccountRepository] create error:", error);
       return failure(createError("Failed to create account", "DB_ERROR", error));
@@ -258,11 +210,13 @@ export class AccountRepository {
    */
   async update(id: string, input: AccountUpdateInput): Promise<RepositoryResult<AccountEntity>> {
     try {
-      const account = await prisma.account.update({
-        where: { id },
-        data: input,
-      });
-      return success(account);
+      const result = await db.update(accounts).set({
+        ...input,
+        updatedAt: new Date(),
+      }).where(eq(accounts.id, id)).returning();
+
+      if (result.length === 0) return failure(createError("Not found", "NOT_FOUND", null));
+      return success(result[0]!);
     } catch (error) {
       console.error("[AccountRepository] update error:", error);
       return failure(createError("Failed to update account", "DB_ERROR", error));
@@ -274,10 +228,9 @@ export class AccountRepository {
    */
   async delete(id: string): Promise<RepositoryResult<AccountEntity>> {
     try {
-      const account = await prisma.account.delete({
-        where: { id },
-      });
-      return success(account);
+      const result = await db.delete(accounts).where(eq(accounts.id, id)).returning();
+      if (result.length === 0) return failure(createError("Not found", "NOT_FOUND", null));
+      return success(result[0]!);
     } catch (error) {
       console.error("[AccountRepository] delete error:", error);
       return failure(createError("Failed to delete account", "DB_ERROR", error));
@@ -289,10 +242,8 @@ export class AccountRepository {
    */
   async deleteByUserId(userId: string): Promise<RepositoryResult<{ count: number }>> {
     try {
-      const result = await prisma.account.deleteMany({
-        where: { userId },
-      });
-      return success({ count: result.count });
+      const result = await db.delete(accounts).where(eq(accounts.userId, userId)).returning({ id: accounts.id });
+      return success({ count: result.length });
     } catch (error) {
       console.error("[AccountRepository] deleteByUserId error:", error);
       return failure(createError("Failed to delete accounts by user ID", "DB_ERROR", error));
@@ -302,10 +253,10 @@ export class AccountRepository {
   /**
    * Count total accounts
    */
-  async count(where?: Prisma.AccountWhereInput): Promise<RepositoryResult<number>> {
+  async count(): Promise<RepositoryResult<number>> {
     try {
-      const count = await prisma.account.count({ where });
-      return success(count);
+      const result = await db.select({ value: drizzleCount() }).from(accounts);
+      return success(result[0]?.value ?? 0);
     } catch (error) {
       console.error("[AccountRepository] count error:", error);
       return failure(createError("Failed to count accounts", "DB_ERROR", error));
@@ -317,13 +268,12 @@ export class AccountRepository {
    */
   async exists(userId: string, providerId: string): Promise<RepositoryResult<boolean>> {
     try {
-      const count = await prisma.account.count({
-        where: {
-          userId,
-          providerId,
-        },
-      });
-      return success(count > 0);
+      const result = await db.select({ id: accounts.id })
+        .from(accounts)
+        .where(and(eq(accounts.userId, userId), eq(accounts.providerId, providerId)))
+        .limit(1);
+
+      return success(result.length > 0);
     } catch (error) {
       console.error("[AccountRepository] exists error:", error);
       return failure(createError("Failed to check account existence", "DB_ERROR", error));

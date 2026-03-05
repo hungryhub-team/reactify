@@ -252,6 +252,7 @@ async function resetPassword(id: string): Promise<Result<{ message: string }>> {
       }
     } else {
       const createResult = await accountRepository.create({
+        id: crypto.randomUUID(),
         accountId: id,
         providerId: "credential",
         userId: id,

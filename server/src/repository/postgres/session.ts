@@ -1,5 +1,6 @@
-import { prisma } from "../../db";
-import type { Prisma } from "../../../generated/prisma/client";
+import { db } from "../../db";
+import { sessions } from "../../db/schema";
+import { eq, count as drizzleCount, sql, lt, gt } from "drizzle-orm";
 import {
   type RepositoryResult,
   type PaginationParams,
@@ -13,31 +14,9 @@ import {
 // Types
 // ---------------------
 
-export type SessionEntity = {
-  id: string;
-  expiresAt: Date;
-  token: string;
-  createdAt: Date;
-  updatedAt: Date;
-  ipAddress: string | null;
-  userAgent: string | null;
-  userId: string;
-};
-
-export type SessionCreateInput = {
-  expiresAt: Date;
-  token: string;
-  userId: string;
-  ipAddress?: string | null;
-  userAgent?: string | null;
-};
-
-export type SessionUpdateInput = {
-  expiresAt?: Date;
-  token?: string;
-  ipAddress?: string | null;
-  userAgent?: string | null;
-};
+export type SessionEntity = typeof sessions.$inferSelect;
+export type SessionCreateInput = typeof sessions.$inferInsert;
+export type SessionUpdateInput = Partial<SessionCreateInput>;
 
 export type SessionWithUser = SessionEntity & {
   user: {
@@ -58,22 +37,20 @@ export class SessionRepository {
    */
   async findById(id: string, includeUser = false): Promise<RepositoryResult<SessionEntity | SessionWithUser | null>> {
     try {
-      const session = await prisma.session.findUnique({
-        where: { id },
-        include: includeUser
-          ? {
-              user: {
-                select: {
-                  id: true,
-                  email: true,
-                  name: true,
-                  role: true,
-                },
-              },
+      const session = await db.query.sessions.findFirst({
+        where: eq(sessions.id, id),
+        with: includeUser ? {
+          user: {
+            columns: {
+              id: true,
+              email: true,
+              name: true,
+              role: true,
             }
-          : undefined,
+          }
+        } : undefined,
       });
-      return success(session);
+      return success(session ?? null);
     } catch (error) {
       console.error("[SessionRepository] findById error:", error);
       return failure(createError("Failed to find session by ID", "DB_ERROR", error));
@@ -85,22 +62,20 @@ export class SessionRepository {
    */
   async findByToken(token: string, includeUser = false): Promise<RepositoryResult<SessionEntity | SessionWithUser | null>> {
     try {
-      const session = await prisma.session.findUnique({
-        where: { token },
-        include: includeUser
-          ? {
-              user: {
-                select: {
-                  id: true,
-                  email: true,
-                  name: true,
-                  role: true,
-                },
-              },
+      const session = await db.query.sessions.findFirst({
+        where: eq(sessions.token, token),
+        with: includeUser ? {
+          user: {
+            columns: {
+              id: true,
+              email: true,
+              name: true,
+              role: true,
             }
-          : undefined,
+          }
+        } : undefined,
       });
-      return success(session);
+      return success(session ?? null);
     } catch (error) {
       console.error("[SessionRepository] findByToken error:", error);
       return failure(createError("Failed to find session by token", "DB_ERROR", error));
@@ -116,16 +91,17 @@ export class SessionRepository {
       const limit = params?.limit ?? 10;
       const skip = (page - 1) * limit;
 
-      const [items, total] = await Promise.all([
-        prisma.session.findMany({
-          where: { userId },
-          orderBy: { createdAt: "desc" },
-          skip,
-          take: limit,
-        }),
-        prisma.session.count({ where: { userId } }),
+      const [items, totalResult] = await Promise.all([
+        db.select()
+          .from(sessions)
+          .where(eq(sessions.userId, userId))
+          .orderBy(sql`${sessions.createdAt} DESC`)
+          .limit(limit)
+          .offset(skip),
+        db.select({ count: drizzleCount() }).from(sessions).where(eq(sessions.userId, userId)),
       ]);
 
+      const total = totalResult[0]?.count ?? 0;
       const totalPages = Math.ceil(total / limit);
 
       return success({
@@ -149,15 +125,16 @@ export class SessionRepository {
       const { page, limit } = params;
       const skip = (page - 1) * limit;
 
-      const [items, total] = await Promise.all([
-        prisma.session.findMany({
-          orderBy: { createdAt: "desc" },
-          skip,
-          take: limit,
-        }),
-        prisma.session.count(),
+      const [items, totalResult] = await Promise.all([
+        db.select()
+          .from(sessions)
+          .orderBy(sql`${sessions.createdAt} DESC`)
+          .limit(limit)
+          .offset(skip),
+        db.select({ count: drizzleCount() }).from(sessions),
       ]);
 
+      const total = totalResult[0]?.count ?? 0;
       const totalPages = Math.ceil(total / limit);
 
       return success({
@@ -178,24 +155,16 @@ export class SessionRepository {
    */
   async create(input: SessionCreateInput): Promise<RepositoryResult<SessionEntity>> {
     try {
-      const session = await prisma.session.create({
-        data: {
-          expiresAt: input.expiresAt,
-          token: input.token,
-          userId: input.userId,
-          ipAddress: input.ipAddress ?? null,
-          userAgent: input.userAgent ?? null,
-        },
-      });
-      return success(session);
+      const result = await db.insert(sessions).values({
+        ...input,
+        id: input.id ?? crypto.randomUUID(), // Assume cuid/uuid replacement
+      }).returning();
+      return success(result[0]!);
     } catch (error) {
       console.error("[SessionRepository] create error:", error);
-      
-      // Handle unique constraint violation
-      if (error instanceof Error && "code" in error && error.code === "P2002") {
+      if (typeof error === 'object' && error !== null && 'code' in error && error.code === "23505") {
         return failure(createError("Session token already exists", "DUPLICATE_TOKEN", error));
       }
-      
       return failure(createError("Failed to create session", "DB_ERROR", error));
     }
   }
@@ -205,11 +174,13 @@ export class SessionRepository {
    */
   async update(id: string, input: SessionUpdateInput): Promise<RepositoryResult<SessionEntity>> {
     try {
-      const session = await prisma.session.update({
-        where: { id },
-        data: input,
-      });
-      return success(session);
+      const result = await db.update(sessions).set({
+        ...input,
+        updatedAt: new Date(),
+      }).where(eq(sessions.id, id)).returning();
+
+      if (result.length === 0) return failure(createError("Not found", "NOT_FOUND", null));
+      return success(result[0]!);
     } catch (error) {
       console.error("[SessionRepository] update error:", error);
       return failure(createError("Failed to update session", "DB_ERROR", error));
@@ -221,10 +192,9 @@ export class SessionRepository {
    */
   async delete(id: string): Promise<RepositoryResult<SessionEntity>> {
     try {
-      const session = await prisma.session.delete({
-        where: { id },
-      });
-      return success(session);
+      const result = await db.delete(sessions).where(eq(sessions.id, id)).returning();
+      if (result.length === 0) return failure(createError("Not found", "NOT_FOUND", null));
+      return success(result[0]!);
     } catch (error) {
       console.error("[SessionRepository] delete error:", error);
       return failure(createError("Failed to delete session", "DB_ERROR", error));
@@ -236,10 +206,9 @@ export class SessionRepository {
    */
   async deleteByToken(token: string): Promise<RepositoryResult<SessionEntity>> {
     try {
-      const session = await prisma.session.delete({
-        where: { token },
-      });
-      return success(session);
+      const result = await db.delete(sessions).where(eq(sessions.token, token)).returning();
+      if (result.length === 0) return failure(createError("Not found", "NOT_FOUND", null));
+      return success(result[0]!);
     } catch (error) {
       console.error("[SessionRepository] deleteByToken error:", error);
       return failure(createError("Failed to delete session by token", "DB_ERROR", error));
@@ -251,10 +220,8 @@ export class SessionRepository {
    */
   async deleteByUserId(userId: string): Promise<RepositoryResult<{ count: number }>> {
     try {
-      const result = await prisma.session.deleteMany({
-        where: { userId },
-      });
-      return success({ count: result.count });
+      const result = await db.delete(sessions).where(eq(sessions.userId, userId)).returning({ id: sessions.id });
+      return success({ count: result.length });
     } catch (error) {
       console.error("[SessionRepository] deleteByUserId error:", error);
       return failure(createError("Failed to delete sessions by user ID", "DB_ERROR", error));
@@ -266,14 +233,8 @@ export class SessionRepository {
    */
   async deleteExpired(): Promise<RepositoryResult<{ count: number }>> {
     try {
-      const result = await prisma.session.deleteMany({
-        where: {
-          expiresAt: {
-            lt: new Date(),
-          },
-        },
-      });
-      return success({ count: result.count });
+      const result = await db.delete(sessions).where(lt(sessions.expiresAt, new Date())).returning({ id: sessions.id });
+      return success({ count: result.length });
     } catch (error) {
       console.error("[SessionRepository] deleteExpired error:", error);
       return failure(createError("Failed to delete expired sessions", "DB_ERROR", error));
@@ -283,10 +244,10 @@ export class SessionRepository {
   /**
    * Count total sessions
    */
-  async count(where?: Prisma.SessionWhereInput): Promise<RepositoryResult<number>> {
+  async count(): Promise<RepositoryResult<number>> {
     try {
-      const count = await prisma.session.count({ where });
-      return success(count);
+      const result = await db.select({ value: drizzleCount() }).from(sessions);
+      return success(result[0]?.value ?? 0);
     } catch (error) {
       console.error("[SessionRepository] count error:", error);
       return failure(createError("Failed to count sessions", "DB_ERROR", error));
@@ -298,15 +259,12 @@ export class SessionRepository {
    */
   async isValid(token: string): Promise<RepositoryResult<boolean>> {
     try {
-      const count = await prisma.session.count({
-        where: {
-          token,
-          expiresAt: {
-            gt: new Date(),
-          },
-        },
-      });
-      return success(count > 0);
+      const result = await db.select({ id: sessions.id })
+        .from(sessions)
+        .where(sql`${sessions.token} = ${token} AND ${sessions.expiresAt} > NOW()`)
+        .limit(1);
+
+      return success(result.length > 0);
     } catch (error) {
       console.error("[SessionRepository] isValid error:", error);
       return failure(createError("Failed to check session validity", "DB_ERROR", error));

@@ -1,5 +1,6 @@
-import { prisma } from "../../db";
-import type { Prisma } from "../../../generated/prisma/client";
+import { db } from "../../db";
+import { verifications } from "../../db/schema";
+import { eq, and, count as drizzleCount, sql, lt, gt } from "drizzle-orm";
 import {
   type RepositoryResult,
   type PaginationParams,
@@ -13,25 +14,9 @@ import {
 // Types
 // ---------------------
 
-export type VerificationEntity = {
-  id: string;
-  identifier: string;
-  value: string;
-  expiresAt: Date;
-  createdAt: Date | null;
-  updatedAt: Date | null;
-};
-
-export type VerificationCreateInput = {
-  identifier: string;
-  value: string;
-  expiresAt: Date;
-};
-
-export type VerificationUpdateInput = {
-  value?: string;
-  expiresAt?: Date;
-};
+export type VerificationEntity = typeof verifications.$inferSelect;
+export type VerificationCreateInput = typeof verifications.$inferInsert;
+export type VerificationUpdateInput = Partial<VerificationCreateInput>;
 
 // ---------------------
 // Repository
@@ -43,10 +28,8 @@ export class VerificationRepository {
    */
   async findById(id: string): Promise<RepositoryResult<VerificationEntity | null>> {
     try {
-      const verification = await prisma.verification.findUnique({
-        where: { id },
-      });
-      return success(verification);
+      const result = await db.select().from(verifications).where(eq(verifications.id, id)).limit(1);
+      return success(result[0] ?? null);
     } catch (error) {
       console.error("[VerificationRepository] findById error:", error);
       return failure(createError("Failed to find verification by ID", "DB_ERROR", error));
@@ -61,13 +44,11 @@ export class VerificationRepository {
     value: string
   ): Promise<RepositoryResult<VerificationEntity | null>> {
     try {
-      const verification = await prisma.verification.findFirst({
-        where: {
-          identifier,
-          value,
-        },
-      });
-      return success(verification);
+      const result = await db.select()
+        .from(verifications)
+        .where(and(eq(verifications.identifier, identifier), eq(verifications.value, value)))
+        .limit(1);
+      return success(result[0] ?? null);
     } catch (error) {
       console.error("[VerificationRepository] findByIdentifierAndValue error:", error);
       return failure(createError("Failed to find verification", "DB_ERROR", error));
@@ -83,16 +64,17 @@ export class VerificationRepository {
       const limit = params?.limit ?? 10;
       const skip = (page - 1) * limit;
 
-      const [items, total] = await Promise.all([
-        prisma.verification.findMany({
-          where: { identifier },
-          orderBy: { createdAt: "desc" },
-          skip,
-          take: limit,
-        }),
-        prisma.verification.count({ where: { identifier } }),
+      const [items, totalResult] = await Promise.all([
+        db.select()
+          .from(verifications)
+          .where(eq(verifications.identifier, identifier))
+          .orderBy(sql`${verifications.createdAt} DESC`)
+          .limit(limit)
+          .offset(skip),
+        db.select({ count: drizzleCount() }).from(verifications).where(eq(verifications.identifier, identifier)),
       ]);
 
+      const total = totalResult[0]?.count ?? 0;
       const totalPages = Math.ceil(total / limit);
 
       return success({
@@ -116,15 +98,16 @@ export class VerificationRepository {
       const { page, limit } = params;
       const skip = (page - 1) * limit;
 
-      const [items, total] = await Promise.all([
-        prisma.verification.findMany({
-          orderBy: { createdAt: "desc" },
-          skip,
-          take: limit,
-        }),
-        prisma.verification.count(),
+      const [items, totalResult] = await Promise.all([
+        db.select()
+          .from(verifications)
+          .orderBy(sql`${verifications.createdAt} DESC`)
+          .limit(limit)
+          .offset(skip),
+        db.select({ count: drizzleCount() }).from(verifications),
       ]);
 
+      const total = totalResult[0]?.count ?? 0;
       const totalPages = Math.ceil(total / limit);
 
       return success({
@@ -145,14 +128,11 @@ export class VerificationRepository {
    */
   async create(input: VerificationCreateInput): Promise<RepositoryResult<VerificationEntity>> {
     try {
-      const verification = await prisma.verification.create({
-        data: {
-          identifier: input.identifier,
-          value: input.value,
-          expiresAt: input.expiresAt,
-        },
-      });
-      return success(verification);
+      const result = await db.insert(verifications).values({
+        ...input,
+        id: input.id ?? crypto.randomUUID(), // Assume cuid/uuid replacement
+      }).returning();
+      return success(result[0]!);
     } catch (error) {
       console.error("[VerificationRepository] create error:", error);
       return failure(createError("Failed to create verification", "DB_ERROR", error));
@@ -164,11 +144,13 @@ export class VerificationRepository {
    */
   async update(id: string, input: VerificationUpdateInput): Promise<RepositoryResult<VerificationEntity>> {
     try {
-      const verification = await prisma.verification.update({
-        where: { id },
-        data: input,
-      });
-      return success(verification);
+      const result = await db.update(verifications).set({
+        ...input,
+        updatedAt: new Date(),
+      }).where(eq(verifications.id, id)).returning();
+
+      if (result.length === 0) return failure(createError("Not found", "NOT_FOUND", null));
+      return success(result[0]!);
     } catch (error) {
       console.error("[VerificationRepository] update error:", error);
       return failure(createError("Failed to update verification", "DB_ERROR", error));
@@ -180,10 +162,9 @@ export class VerificationRepository {
    */
   async delete(id: string): Promise<RepositoryResult<VerificationEntity>> {
     try {
-      const verification = await prisma.verification.delete({
-        where: { id },
-      });
-      return success(verification);
+      const result = await db.delete(verifications).where(eq(verifications.id, id)).returning();
+      if (result.length === 0) return failure(createError("Not found", "NOT_FOUND", null));
+      return success(result[0]!);
     } catch (error) {
       console.error("[VerificationRepository] delete error:", error);
       return failure(createError("Failed to delete verification", "DB_ERROR", error));
@@ -195,10 +176,8 @@ export class VerificationRepository {
    */
   async deleteByIdentifier(identifier: string): Promise<RepositoryResult<{ count: number }>> {
     try {
-      const result = await prisma.verification.deleteMany({
-        where: { identifier },
-      });
-      return success({ count: result.count });
+      const result = await db.delete(verifications).where(eq(verifications.identifier, identifier)).returning({ id: verifications.id });
+      return success({ count: result.length });
     } catch (error) {
       console.error("[VerificationRepository] deleteByIdentifier error:", error);
       return failure(createError("Failed to delete verifications by identifier", "DB_ERROR", error));
@@ -210,14 +189,8 @@ export class VerificationRepository {
    */
   async deleteExpired(): Promise<RepositoryResult<{ count: number }>> {
     try {
-      const result = await prisma.verification.deleteMany({
-        where: {
-          expiresAt: {
-            lt: new Date(),
-          },
-        },
-      });
-      return success({ count: result.count });
+      const result = await db.delete(verifications).where(lt(verifications.expiresAt, new Date())).returning({ id: verifications.id });
+      return success({ count: result.length });
     } catch (error) {
       console.error("[VerificationRepository] deleteExpired error:", error);
       return failure(createError("Failed to delete expired verifications", "DB_ERROR", error));
@@ -227,10 +200,10 @@ export class VerificationRepository {
   /**
    * Count total verifications
    */
-  async count(where?: Prisma.VerificationWhereInput): Promise<RepositoryResult<number>> {
+  async count(): Promise<RepositoryResult<number>> {
     try {
-      const count = await prisma.verification.count({ where });
-      return success(count);
+      const result = await db.select({ value: drizzleCount() }).from(verifications);
+      return success(result[0]?.value ?? 0);
     } catch (error) {
       console.error("[VerificationRepository] count error:", error);
       return failure(createError("Failed to count verifications", "DB_ERROR", error));
@@ -242,16 +215,12 @@ export class VerificationRepository {
    */
   async isValid(identifier: string, value: string): Promise<RepositoryResult<boolean>> {
     try {
-      const count = await prisma.verification.count({
-        where: {
-          identifier,
-          value,
-          expiresAt: {
-            gt: new Date(),
-          },
-        },
-      });
-      return success(count > 0);
+      const result = await db.select({ id: verifications.id })
+        .from(verifications)
+        .where(sql`${verifications.identifier} = ${identifier} AND ${verifications.value} = ${value} AND ${verifications.expiresAt} > NOW()`)
+        .limit(1);
+
+      return success(result.length > 0);
     } catch (error) {
       console.error("[VerificationRepository] isValid error:", error);
       return failure(createError("Failed to check verification validity", "DB_ERROR", error));
@@ -263,18 +232,13 @@ export class VerificationRepository {
    */
   async findLatestValid(identifier: string): Promise<RepositoryResult<VerificationEntity | null>> {
     try {
-      const verification = await prisma.verification.findFirst({
-        where: {
-          identifier,
-          expiresAt: {
-            gt: new Date(),
-          },
-        },
-        orderBy: {
-          createdAt: "desc",
-        },
-      });
-      return success(verification);
+      const result = await db.select()
+        .from(verifications)
+        .where(sql`${verifications.identifier} = ${identifier} AND ${verifications.expiresAt} > NOW()`)
+        .orderBy(sql`${verifications.createdAt} DESC`)
+        .limit(1);
+
+      return success(result[0] ?? null);
     } catch (error) {
       console.error("[VerificationRepository] findLatestValid error:", error);
       return failure(createError("Failed to find latest valid verification", "DB_ERROR", error));
