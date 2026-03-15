@@ -1,0 +1,13 @@
+{
+  "permissions": {
+    "allow": [
+      "WebSearch",
+      "Bash(bun pm:*)",
+      "Read(//Users/apple/.bun/bin/**)",
+      "Read(//opt/homebrew/bin/**)",
+      "Read(//usr/local/bin/**)",
+      "Bash(/Users/apple/.bun/bin/bun run:*)",
+      "Bash(/Users/apple/.bun/bin/bun pm:*)"
+    ]
+  }
+}

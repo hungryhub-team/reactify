@@ -38,7 +38,7 @@ export class AccountRepository {
   async findById(id: string, includeUser = false): Promise<RepositoryResult<AccountEntity | AccountWithUser | null>> {
     try {
       const account = await db.query.accounts.findFirst({
-        where: eq(accounts.id, id),
+        where: { id },
         with: includeUser ? {
           user: {
             columns: {
@@ -67,7 +67,10 @@ export class AccountRepository {
   ): Promise<RepositoryResult<AccountEntity | AccountWithUser | null>> {
     try {
       const account = await db.query.accounts.findFirst({
-        where: and(eq(accounts.providerId, providerId), eq(accounts.accountId, accountId)),
+        where: {
+          providerId,
+          accountId,
+        },
         with: includeUser ? {
           user: {
             columns: {

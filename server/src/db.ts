@@ -7,5 +7,9 @@ export const connectionString =
   "postgres://root:rootroot@localhost:5432/reactify_example_db";
 
 const pool = new pg.Pool({ connectionString });
-export const db = drizzle(pool, { schema });
+export const db = drizzle({
+  client: pool,
+  schema,
+  relations: schema.relations,
+});
 export { pool };

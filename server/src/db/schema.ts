@@ -1,5 +1,5 @@
 import { pgTable, serial, text, timestamp, boolean, integer } from "drizzle-orm/pg-core";
-import { relations } from "drizzle-orm";
+import { defineRelations } from "drizzle-orm";
 
 export const users = pgTable("user", {
     id: text("id").primaryKey(),
@@ -11,11 +11,6 @@ export const users = pgTable("user", {
     createdAt: timestamp("createdAt").defaultNow().notNull(),
     updatedAt: timestamp("updatedAt").defaultNow().notNull(),
 });
-
-export const usersRelations = relations(users, ({ many }) => ({
-    sessions: many(sessions),
-    accounts: many(accounts),
-}));
 
 export const sessions = pgTable("session", {
     id: text("id").primaryKey(),
@@ -29,13 +24,6 @@ export const sessions = pgTable("session", {
         .notNull()
         .references(() => users.id, { onDelete: "cascade" }),
 });
-
-export const sessionsRelations = relations(sessions, ({ one }) => ({
-    user: one(users, {
-        fields: [sessions.userId],
-        references: [users.id],
-    }),
-}));
 
 export const accounts = pgTable("account", {
     id: text("id").primaryKey(),
@@ -55,13 +43,6 @@ export const accounts = pgTable("account", {
     updatedAt: timestamp("updatedAt").defaultNow().notNull(),
 });
 
-export const accountsRelations = relations(accounts, ({ one }) => ({
-    user: one(users, {
-        fields: [accounts.userId],
-        references: [users.id],
-    }),
-}));
-
 export const verifications = pgTable("verification", {
     id: text("id").primaryKey(),
     identifier: text("identifier").notNull(),
@@ -79,3 +60,24 @@ export const tasks = pgTable("tasks", {
     createdAt: timestamp("createdAt").defaultNow().notNull(),
     updatedAt: timestamp("updatedAt").defaultNow().notNull(),
 });
+
+export const relations = defineRelations({ users, sessions, accounts, verifications, tasks }, (r) => ({
+    users: {
+        sessions: r.many.sessions(),
+        accounts: r.many.accounts(),
+    },
+    sessions: {
+        user: r.one.users({
+            from: r.sessions.userId,
+            to: r.users.id,
+        }),
+    },
+    accounts: {
+        user: r.one.users({
+            from: r.accounts.userId,
+            to: r.users.id,
+        }),
+    },
+    verifications: {},
+    tasks: {},
+}));

@@ -38,7 +38,7 @@ export class SessionRepository {
   async findById(id: string, includeUser = false): Promise<RepositoryResult<SessionEntity | SessionWithUser | null>> {
     try {
       const session = await db.query.sessions.findFirst({
-        where: eq(sessions.id, id),
+        where: { id },
         with: includeUser ? {
           user: {
             columns: {
@@ -63,7 +63,7 @@ export class SessionRepository {
   async findByToken(token: string, includeUser = false): Promise<RepositoryResult<SessionEntity | SessionWithUser | null>> {
     try {
       const session = await db.query.sessions.findFirst({
-        where: eq(sessions.token, token),
+        where: { token },
         with: includeUser ? {
           user: {
             columns: {

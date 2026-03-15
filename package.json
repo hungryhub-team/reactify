@@ -2,7 +2,7 @@
   "name": "reactify",
   "version": "0.5.1",
   "description": "A monorepo template built with Bun, Hono, Vite, and React",
-  "author": "Steve Simkins",
+  "author": "HungryHub Team",
   "license": "MIT",
   "homepage": "https://github.com/stevedylandev/bhvr",
   "packageManager": "bun@1.2.4",

@@ -48,7 +48,7 @@ export class UserRepository {
   async findById(id: string, includeRelations = false): Promise<RepositoryResult<UserEntity | UserWithRelations | null>> {
     try {
       const user = await db.query.users.findFirst({
-        where: eq(users.id, id),
+        where: { id },
         with: includeRelations ? {
           sessions: {
             columns: {
@@ -80,7 +80,7 @@ export class UserRepository {
   async findByEmail(email: string): Promise<RepositoryResult<UserEntity | null>> {
     try {
       const user = await db.query.users.findFirst({
-        where: eq(users.email, email),
+        where: { email },
       });
       return success(user ?? null);
     } catch (error) {
